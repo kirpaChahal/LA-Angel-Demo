@@ -7,7 +7,7 @@
     <title>Vite + React</title>
   </head>
   <body>
-    <!-- Botcopy embed (moved inside <body>) -->
+    <!-- Botcopy embed -->
     <div
       id="botcopy-embedder-d7lcfheammjct"
       class="botcopy-embedder-d7lcfheammjct"
@@ -22,47 +22,73 @@
       </script>
     </div>
 
-    <!-- Persistence script: injects/loads is_new_user boolean -->
+    <!-- Persistence script: pre-request inject + safe coercion -->
     <script>
       (function () {
         const STORAGE_KEY = 'demo.is_new_user';
 
-        // Ensure default = true on first visit
+        // Default to true on first visit
         if (localStorage.getItem(STORAGE_KEY) === null) {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(true));
         }
 
-        // Botcopy queue shim (safe before widget is fully ready)
+        // Robust coercion: handles boolean, "true"/"false", 1/0, etc.
+        function toBool(v) {
+          if (typeof v === 'boolean') return v;
+          if (typeof v === 'number') return v !== 0;
+          if (typeof v === 'string') return v.trim().toLowerCase() === 'true';
+          return Boolean(v);
+        }
+
+        // Botcopy queue shim (safe before widget ready)
         window.Botcopy = window.Botcopy || {};
         const q = (window.__bcq = window.__bcq || []);
         Botcopy.on = function (evt, fn) { q.push([evt, fn]); };
 
-        // On widget ready, send stored value silently to DF session
-        Botcopy.on('ready', function () {
+        // ✅ Inject is_new_user into the VERY FIRST request so CX sees it on turn 0
+        Botcopy.on('pre_request', function (req) {
           try {
             const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'true');
-            (Botcopy.send || Botcopy.sendMessage)?.({
-              message: {
-                type: 'training',
-                command: 'load_is_new_user',
-                parameters: { is_new_user: stored }
-              }
-            });
+            const val = toBool(stored);
+
+            // Attach to request parameters (seen by CX as session params)
+            req.parameters = req.parameters || {};
+            req.parameters.is_new_user = val;
+
+            // Some builds also look at payload.parameters
+            if (req.payload) {
+              req.payload.parameters = req.payload.parameters || {};
+              req.payload.parameters.is_new_user = val;
+            }
+
+            // Debug
+            console.debug('[pre_request] injecting is_new_user =', val);
           } catch (e) {
-            console.warn('Failed to load is_new_user', e);
+            console.warn('pre_request inject failed', e);
           }
         });
 
-        // Listen for the bot’s command to update persistence (when you flip to false)
+        // When the bot tells us to persist, coerce & store. (You already send this from CX.)
         Botcopy.on('action', function (payload) {
           try {
             const msg = payload?.training || payload?.message || payload?.action?.message;
             if (msg?.type === 'training' && msg?.command === 'set_is_new_user') {
-              const val = !!msg?.parameters?.is_new_user;
+              const raw = msg?.parameters?.is_new_user;
+              const val = toBool(raw);
               localStorage.setItem(STORAGE_KEY, JSON.stringify(val));
+              console.debug('[persist] set is_new_user =', val, '(raw:', raw, ')');
+
+              // Optional: also push to this live session immediately
+              (Botcopy.send || Botcopy.sendMessage)?.({
+                message: {
+                  type: 'training',
+                  command: 'load_is_new_user',
+                  parameters: { is_new_user: val }
+                }
+              });
             }
           } catch (e) {
-            console.warn('Failed to persist is_new_user', e);
+            console.warn('action handler error', e);
           }
         });
       })();
