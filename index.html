@@ -22,10 +22,11 @@
       </script>
     </div>
 
-    <!-- Persistence: bc-initialized + setCXParameters (no pre_request) -->
+    <!-- Persistence via bc-initialized + setCXParameters + sendCXEventSilent -->
     <script>
       (function () {
         const STORAGE_KEY = 'demo.is_new_user';
+        let started = false; // prevent double-start
 
         // Coerce anything ("false"/"true", 0/1) -> boolean
         function toBool(v) {
@@ -35,7 +36,7 @@
           return Boolean(v);
         }
 
-        // Ensure default key exists (first visit → true)
+        // Ensure default key (first visit → true)
         try {
           if (localStorage.getItem(STORAGE_KEY) === null) {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(true));
@@ -47,34 +48,40 @@
           console.warn('[persist:init] localStorage unavailable', e);
         }
 
-        // Prime the NEXT CX request with our stored flag
-        function primeNextRequestFromStorage() {
+        function primeAndStart() {
+          if (started) return;
+          started = true;
           try {
             const stored = toBool(JSON.parse(localStorage.getItem(STORAGE_KEY) || 'true'));
+
+            // 1) Prime NEXT request with the param
             if (window.Botcopy && typeof window.Botcopy.setCXParameters === 'function') {
               window.Botcopy.setCXParameters({
-                // webhookHeaders: { ... } // optional auth headers if you use them
                 parameters: { is_new_user: stored }
               });
               console.log('[bc-initialized] setCXParameters → is_new_user =', stored);
-            } else {
-              console.warn('Botcopy.setCXParameters not available yet');
+            }
+
+            // 2) Explicitly start the conversation with an event (includes param too)
+            if (window.Botcopy && typeof window.Botcopy.sendCXEventSilent === 'function') {
+              window.Botcopy.sendCXEventSilent('start_app', {
+                parameters: { is_new_user: stored }
+              });
+              console.log('[bc-initialized] sendCXEventSilent(start_app) with is_new_user =', stored);
             }
           } catch (e) {
-            console.warn('primeNextRequestFromStorage failed', e);
+            console.warn('primeAndStart failed', e);
           }
         }
 
-        // Fire after the chat window initializes (first load, refresh, Clear history)
-        window.addEventListener('bc-initialized', primeNextRequestFromStorage);
+        // Fire after chat window initializes (first load, refresh, Clear history)
+        window.addEventListener('bc-initialized', primeAndStart);
 
-        // Fallback: some builds also expose a "ready" hook
+        // Fallback if your build exposes Botcopy.on('ready')
         if (window.Botcopy?.on) {
-          window.Botcopy.on('ready', primeNextRequestFromStorage);
-        }
+          window.Botcopy.on('ready', primeAndStart);
 
-        // Persist flips from the bot (TRAINING-ONLY to avoid MST races)
-        if (window.Botcopy?.on) {
+          // TRAINING-ONLY handler: persist flips safely
           window.Botcopy.on('action', function (payload) {
             try {
               const t = payload?.training;
@@ -83,7 +90,7 @@
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(val));
                 console.log('[persist] is_new_user =', val);
 
-                // Also prime the next request immediately so CX stays in sync
+                // Prime the next request so CX stays in sync
                 if (typeof window.Botcopy.setCXParameters === 'function') {
                   window.Botcopy.setCXParameters({ parameters: { is_new_user: val } });
                 }
