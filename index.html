@@ -22,7 +22,7 @@
       </script>
     </div>
 
-    <!-- Persistence: inject into EVERY outbound request + safe coercion + debug -->
+    <!-- Persistence: bc-initialized + setCXParameters (no pre_request) -->
     <script>
       (function () {
         const STORAGE_KEY = 'demo.is_new_user';
@@ -35,7 +35,7 @@
           return Boolean(v);
         }
 
-        // Ensure default key exists and log it
+        // Ensure default key exists (first visit → true)
         try {
           if (localStorage.getItem(STORAGE_KEY) === null) {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(true));
@@ -47,59 +47,52 @@
           console.warn('[persist:init] localStorage unavailable', e);
         }
 
-        // Botcopy event queue shim (don’t overwrite if SDK already defined .on)
-        window.Botcopy = window.Botcopy || {};
-        if (typeof window.Botcopy.on !== 'function') {
-          const q = (window.__bcq = window.__bcq || []);
-          window.Botcopy.on = function (evt, fn) { q.push([evt, fn]); };
-        }
-
-        // Inject is_new_user into EVERY outbound request (covers "Clear history" new sessions)
-        Botcopy.on('pre_request', function (req) {
+        // Prime the NEXT CX request with our stored flag
+        function primeNextRequestFromStorage() {
           try {
             const stored = toBool(JSON.parse(localStorage.getItem(STORAGE_KEY) || 'true'));
-
-            // Attach to params (DF CX sees these as session params)
-            req.parameters = req.parameters || {};
-            req.parameters.is_new_user = stored;
-
-            // Some SDK builds also pass via payload.parameters
-            if (req.payload) {
-              req.payload.parameters = req.payload.parameters || {};
-              req.payload.parameters.is_new_user = stored;
-            }
-
-            console.log('[pre_request] is_new_user →', stored);
-          } catch (e) {
-            console.warn('[pre_request] inject failed', e);
-          }
-        });
-
-        // Persist flips from the bot; DO NOT echo immediately (avoids MobX race)
-        Botcopy.on('action', function (payload) {
-          try {
-            const m = payload?.training || payload?.message || payload?.action?.message;
-            if (m?.type === 'training' && m?.command === 'set_is_new_user') {
-              const val = toBool(m?.parameters?.is_new_user);
-              localStorage.setItem(STORAGE_KEY, JSON.stringify(val));
-              console.log('[persist] set is_new_user =', val);
-
-              // If you want to reflect into the live session, defer slightly:
-              // setTimeout(() => {
-              //   (Botcopy.send || Botcopy.sendMessage)?.({
-              //     message: {
-              //       type: 'training',
-              //       command: 'load_is_new_user',
-              //       parameters: { is_new_user: val }
-              //     }
-              //   });
-              //   console.log('[persist] echoed load_is_new_user after defer');
-              // }, 120);
+            if (window.Botcopy && typeof window.Botcopy.setCXParameters === 'function') {
+              window.Botcopy.setCXParameters({
+                // webhookHeaders: { ... } // optional auth headers if you use them
+                parameters: { is_new_user: stored }
+              });
+              console.log('[bc-initialized] setCXParameters → is_new_user =', stored);
+            } else {
+              console.warn('Botcopy.setCXParameters not available yet');
             }
           } catch (e) {
-            console.warn('[action] handler error', e);
+            console.warn('primeNextRequestFromStorage failed', e);
           }
-        });
+        }
+
+        // Fire after the chat window initializes (first load, refresh, Clear history)
+        window.addEventListener('bc-initialized', primeNextRequestFromStorage);
+
+        // Fallback: some builds also expose a "ready" hook
+        if (window.Botcopy?.on) {
+          window.Botcopy.on('ready', primeNextRequestFromStorage);
+        }
+
+        // Persist flips from the bot (TRAINING-ONLY to avoid MST races)
+        if (window.Botcopy?.on) {
+          window.Botcopy.on('action', function (payload) {
+            try {
+              const t = payload?.training;
+              if (t?.type === 'training' && t?.command === 'set_is_new_user') {
+                const val = toBool(t?.parameters?.is_new_user);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(val));
+                console.log('[persist] is_new_user =', val);
+
+                // Also prime the next request immediately so CX stays in sync
+                if (typeof window.Botcopy.setCXParameters === 'function') {
+                  window.Botcopy.setCXParameters({ parameters: { is_new_user: val } });
+                }
+              }
+            } catch (e) {
+              console.warn('[action] training handler error', e);
+            }
+          });
+        }
       })();
     </script>
 
